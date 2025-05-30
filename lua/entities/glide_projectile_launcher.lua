@@ -1,3 +1,5 @@
+if Glide.ACFIntegration then return end
+
 AddCSLuaFile()
 
 ENT.Type = "anim"

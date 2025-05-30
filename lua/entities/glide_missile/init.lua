@@ -1,3 +1,5 @@
+if Glide.ACFIntegration then return end 
+
 AddCSLuaFile( "shared.lua" )
 AddCSLuaFile( "cl_init.lua" )
 

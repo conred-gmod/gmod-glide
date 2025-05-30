@@ -1,3 +1,5 @@
+if Glide.ACFIntegration then return end 
+
 include( "shared.lua" )
 
 function ENT:Initialize()
