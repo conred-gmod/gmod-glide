@@ -1,5 +1,10 @@
 Glide = Glide or {}
 
+if ACF then
+    Glide.ACFIntegration = true
+end
+
+
 -- Vehicle types
 Glide.VEHICLE_TYPE = {
     UNDEFINED = 0,

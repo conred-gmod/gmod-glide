@@ -211,17 +211,7 @@ function ENT:FireCountermeasures()
     for _ = 1, count do
         ang[2] = ang[2] + step
 
-        local flare = ents.Create( "glide_flare" )
-        flare:SetPos( startPos )
-        flare:SetAngles( self:LocalToWorldAngles( ang ) )
-        flare:SetOwner( self )
-        flare:Spawn()
-
-        local phys = flare:GetPhysicsObject()
-
-        if IsValid( phys ) then
-            phys:SetVelocityInstantaneous( vel + flare:GetForward() * 1000 )
-        end
+        Glide.FireFlare(startPos, self:LocalToWorldAngles( ang ), vel, self)
     end
 end
 

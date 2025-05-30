@@ -1,3 +1,5 @@
+if Glide.ACFIntegration then return end
+
 function EFFECT:Init( data )
     local origin = data:GetOrigin()
     local scale = data:GetScale()
