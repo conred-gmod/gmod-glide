@@ -66,7 +66,7 @@ else
         -- 513 is 300 temperature for a standard 40mm flare. This is 1x an aircraft moving at 300 mph. I've added some extra measure. 1.71 * temp needed.
         local temp = 641 * avgFac 
 
-        ACF_CreateFlare(pos, vel + ang:GetForward() * 1000, owner, {
+        ACF_CreateFlare(pos, vel + ang:Forward() * 1000, owner, {
             Lifetime = 80,
             Temp = temp,
             RadarSig = 0.1
