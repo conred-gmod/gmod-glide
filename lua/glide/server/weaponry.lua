@@ -55,7 +55,7 @@ function Glide.FireProjectile( pos, ang, attacker, parent )
     return projectile
 end
 
-do
+if not Glide.ACFIntegtation then
     local RandomFloat = math.Rand
     local Effect = util.Effect
     local TraceLine = util.TraceLine
@@ -171,6 +171,74 @@ do
             eff:SetScale( 1 )
             Effect( "RifleShellEject", eff )
         end
+    end
+else
+    local BulletData_APHE = {
+
+    }
+
+    function Glide.FireBullet( params, traceFilter )
+        local gun = params.inflictor
+
+        local pos = params.pos
+        local ang = params.ang
+
+        local tracerColor = params.tracerColor
+
+        local BulletData
+        if params.acfBulletData then
+            BulletData = params.acfBulletData
+        elseif params.isExplosive then
+            BulletData = ACF.RoundTypes["APHE"]:convert({
+                Id = "20mmRAC",
+                PlayerData.Tracer = tracerColor and 1 or 0,
+                ProjLength = XX,
+                PropLength = XX,
+                Data5 = XX -- FillerVolume
+            })
+
+
+            --length = params.length or 8000
+            --damage = params.damage or 25
+            --explosionRadius = params.explosionRadius or 180
+        else
+            BulletData = ACF.RoundTypes["AP"]:convert({
+                Id = "20mmRAC",
+                PlayerData.Tracer = tracerColor and 1 or 0,
+                ProjLength = XX,
+                PropLength = XX
+            })
+
+            --length = params.length or 30000
+            --damage = params.damage or 20
+        end
+        
+
+
+        local spread = params.spread or 0.3
+        ang[1] = ang[1] + RandomFloat( -spread, spread )
+        ang[2] = ang[2] + RandomFloat( -spread, spread )
+
+        BulletData.Pos = pos
+        BulletData.Flight = ang:Forward() * BulletData.MuzzleVel * 39.37
+
+        BulletData.Gun = gun
+        BulletData.User = params.attacker
+
+        if gun ~= nil then
+            BulletData.Flight:Add(gun:GetVelocity())
+        end
+
+        -- TODO
+        
+        if color ~= nil then
+            BulletData.Tracer = 1
+        end
+
+        ACF.RoundTypes[BulletData.Type]:create(BulletData)
+
+        -- TODO
+        local shellDir = params.shellDirection
     end
 end
 
