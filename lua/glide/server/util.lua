@@ -190,7 +190,7 @@ end
 
 --- Check if a player can enter a locked vehicle.
 function Glide.CanEnterLockedVehicle( ply, vehicle )
-    return hook.Run( "Glide_CanEnterLockedVehicle", ply, vehicle ) or Glide.CanLockVehicle( ply, vehicle )
+    return hook.Run( "Glide_CanEnterLockedVehicle", ply, vehicle )
 end
 
 --- Make a player switch to another seat
