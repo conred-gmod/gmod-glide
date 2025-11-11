@@ -18,7 +18,18 @@ Glide.EngineStream = EngineStream
 local streamInstances = Glide.streamInstances or {}
 Glide.streamInstances = streamInstances
 
-function Glide.CreateEngineStream( parent )
+function Glide.DestroyAllEngineStreams()
+    local IsBasedOn = scripted_ents.IsBasedOn
+
+    for _, e in ents.Iterator() do
+        if IsValid( e ) and e.GetClass and IsBasedOn( e:GetClass(), "base_glide" ) and e.stream then
+            e.stream:Destroy()
+            e.stream = nil
+        end
+    end
+end
+
+function Glide.CreateEngineStream( parent, doNotUseWebAudio )
     local id = ( Glide.lastStreamInstanceID or 0 ) + 1
     Glide.lastStreamInstanceID = id
 
@@ -32,18 +43,28 @@ function Glide.CreateEngineStream( parent )
         wobbleTime = 0,
         isPlaying = false,
         isRedlining = false,
+        redlineTime = 0,
         firstPerson = false,
         volumeMultiplier = 0,
 
         inputs = {
             throttle = 0,
-            rpmFraction = 0
+            rpmFraction = 0,
+            redline = 0
         }
     }
 
     -- Customizable parameters
     for k, v in pairs( DEFAULT_STREAM_PARAMS ) do
         stream[k] = v
+    end
+
+    local WebAudio = Glide.WebAudio
+
+    -- Use the Web Audio API. This does nothing if this
+    -- feature is disabled, or the streamCount limit has been reached.
+    if not doNotUseWebAudio then
+        WebAudio:RequestStreamCreation( stream )
     end
 
     streamInstances[id] = stream
@@ -53,6 +74,10 @@ function Glide.CreateEngineStream( parent )
 end
 
 function EngineStream:Destroy()
+    if self.isWebAudio then
+        Glide.WebAudio:RequestStreamDeletion( self.id )
+    end
+
     self:RemoveAllLayers()
     self.layers = nil
     self.parent = nil
@@ -100,6 +125,24 @@ function EngineStream:LoadJSON( data )
 
     for id, layer in SortedPairs( data.layers ) do
         self:AddLayer( id, layer.path, layer.controllers, layer.redline == true )
+    end
+
+    if self.isWebAudio then
+        -- Upload the (now sanitized) properties of this stream to the Web Audio Bridge
+        data = {
+            kv = data.kv,
+            layers = {}
+        }
+
+        for id, layer in pairs( self.layers ) do
+            data.layers[id] = {
+                path = layer.path,
+                redline = layer.redline,
+                controllers = layer.controllers
+            }
+        end
+
+        self.updateWebJSON = Glide.ToJSON( data, false )
     end
 end
 
@@ -189,6 +232,13 @@ function EngineStream:RemoveLayer( id )
     self.layers[id] = nil
 end
 
+function EngineStream:SetLayerOffset( id, offset )
+    local layer = self.layers[id]
+    if layer then
+        layer.offset = offset
+    end
+end
+
 function EngineStream:Play()
     self.isPlaying = true
     self.volumeMultiplier = 0
@@ -212,43 +262,55 @@ function EngineStream:Pause()
 end
 
 local Clamp = math.Clamp
-local Remap = math.Remap
-local Cos = math.cos
 
-local Time = RealTime
+local function FakeSpatialSound( parent, offset, fadeDist, firstPerson, eyePos, eyeRight )
+    -- Calculate direction and distance from the camera
+    local origin = parent:LocalToWorld( offset )
+    local dir = origin - eyePos
+    local dist = dir:Length()
+
+    -- Attenuate depending on distance
+    local vol = 1 - Clamp( dist / fadeDist, 0, 1 )
+
+    -- Pan to simulate positioning the sound in the world
+    dir:Normalize()
+    local pan = firstPerson and 0 or eyeRight:Dot( dir )
+
+    return vol, pan
+end
+
+local Cos = math.cos
+local Remap = math.Remap
+local Approach = math.Approach
 local GetVolume = Glide.Config.GetVolume
 
-local vol, pitch, pan
-local origin, dir, dist
+local baseVol, pitch
 
-function EngineStream:Think( dt, eyePos, eyeRight )
+function EngineStream:Think( dt, eyePos, eyeAng )
     if not self.isPlaying then return end
-    if not IsValid( self.parent ) then return end
+
+    local parent = self.parent
+    if not IsValid( parent ) then return end
+
+    if self.isWebAudio then
+        -- If this stream is handled by the Web Audio Bridge,
+        -- then only update a few variables position - everything
+        -- else is handled by the Web Audio Bridge logic.
+        if self.firstPerson then
+            self.position = eyePos + eyeAng:Forward() * 10
+        else
+            self.position = parent:LocalToWorld( self.offset )
+        end
+
+        return
+    end
 
     if self.volumeMultiplier < 1 then
         self.volumeMultiplier = math.min( 1, Glide.ExpDecay( self.volumeMultiplier, 1.01, 4, dt ) )
     end
 
-    vol = self.volume * self.volumeMultiplier * GetVolume( "carVolume" )
+    baseVol = self.volume * self.volumeMultiplier * GetVolume( "carVolume" )
     pitch = 1
-    pan = 0
-
-    -- Calculate direction and distance from the camera
-    origin = self.parent:LocalToWorld( self.offset )
-    dir = origin - eyePos
-    dist = dir:Length()
-
-    -- Attenuate depending on distance
-    vol = vol * ( 1 - Clamp( dist / self.fadeDist, 0, 1 ) )
-
-    -- Pan to make the sound have a fake position
-    -- in the world, but only in 3rd person camera.
-    if self.firstPerson then
-        pan = 0
-    else
-        dir:Normalize()
-        pan = eyeRight:Dot( dir )
-    end
 
     local inputs = self.inputs
 
@@ -265,11 +327,26 @@ function EngineStream:Think( dt, eyePos, eyeRight )
     local redlineVol = 1
 
     if self.isRedlining then
-        local redlineStrength = self.redlineStrength
-        redlineVol = ( 1 - redlineStrength ) + Cos( Time() * self.redlineFrequency ) * redlineStrength
+        local strength = self.redlineStrength * 1.5
+        local freq = self.redlineFrequency
+        local time = self.redlineTime + dt
+        self.redlineTime = time
+
+        local stage = Cos( time * freq )
+        redlineVol = 1 - strength * Clamp( 1 - stage * 2, 0, 1 )
+
+        stage = Cos( ( time + freq * 0.2 ) * freq )
+        pitch = pitch * ( 1 - ( 0.5 - stage * 0.5 ) * strength * 0.05 )
+    else
+        self.redlineTime = 0
     end
 
-    local channel, value
+    inputs.redline = Approach( inputs.redline, self.isRedlining and 1 or 0, dt * 5 )
+
+    local eyeRight = eyeAng:Right()
+    local fadeDist = self.fadeDist
+    local firstPerson = self.firstPerson
+    local channel, value, vol, pan
 
     for _, layer in pairs( self.layers ) do
         channel = layer.channel
@@ -289,8 +366,10 @@ function EngineStream:Think( dt, eyePos, eyeRight )
             layer.volume = outputs.volume * ( layer.redline and redlineVol or 1 )
             layer.pitch = outputs.pitch * pitch
 
+            vol, pan = FakeSpatialSound( parent, layer.offset or self.offset, fadeDist, firstPerson, eyePos, eyeRight )
+
             channel:SetPlaybackRate( layer.pitch )
-            channel:SetVolume( layer.isMuted and 0 or layer.volume * vol )
+            channel:SetVolume( layer.isMuted and 0 or layer.volume * baseVol * vol )
             channel:SetPan( pan )
 
             if channel:GetState() < 1 then
@@ -378,16 +457,15 @@ local GetLocalViewLocation = Glide.GetLocalViewLocation
 hook.Add( "Think", "Glide.ProcessEngineStreams", function()
     local dt = FrameTime()
     local eyePos, eyeAng = GetLocalViewLocation()
-    local eyeRight = eyeAng:Right()
 
     for streamId, stream in pairs( streamInstances ) do
         -- Let the stream do it's thing
-        stream:Think( dt, eyePos, eyeRight )
+        stream:Think( dt, eyePos, eyeAng )
 
         for layerId, layer in pairs( stream.layers ) do
             -- If this layer has not loaded yet,
             -- and we are not busy loading another one...
-            if not layer.isLoaded and loading == nil then
+            if not layer.isLoaded and not stream.isWebAudio and loading == nil then
                 loading = {
                     streamId = streamId,
                     layerId = layerId,
