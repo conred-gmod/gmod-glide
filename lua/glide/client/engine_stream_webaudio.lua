@@ -111,7 +111,8 @@ function WebAudio:OnHTMLReady()
         ["dryVolume"] = { 1.0, true },
         ["wetVolume"] = { 1.0, true },
         ["delayTime"] = { 0.1, true },
-        ["delayFeedback"] = { 0.1, 0.1, true }
+        ["delayFeedback"] = { 0.1, true },
+        ["postFilterQ"] = { 0.0, true },
     }
 
     self.room = {
@@ -226,114 +227,122 @@ local Clamp = math.Clamp
 local ExpDecay = Glide.ExpDecay
 
 do
-    local ROOM_INPULSE_RESPONSES = {
-        -- Room size, Audio (closed ceiling), Audio (open ceiling)
-        { 0.3, "1.8s_99w_900hz_30m.wav", "1.8s_99w_100hz_30m.wav" },
-        { 0.6, "2.8s_99w_900hz_30m.wav", "2.8s_99w_100hz_30m.wav" },
-        { 0.8, "3.8s_99w_900hz_30m.wav", "3.8s_99w_100hz_30m.wav" },
-        { 1.0, "4.8s_99w_900hz_30m.wav", "4.8s_99w_100hz_30m.wav" }
-    }
-
-    local ROOM_ECHO_DELAYS = {
-        -- Room size, Echo delay
-        { 0.05, 0.02 },
-        { 0.2, 0.04 },
-        { 0.3, 0.1 },
-        { 0.6, 0.2 },
-        { 1.0, 0.3 }
-    }
-
-    local TRACE_DIRECTIONS = {
-        Vector( 5000, 0, 0 ), -- North
-        Vector( -5000, 0, 0 ), -- South
-        Vector( 0, 5000, 0 ), -- West
-        Vector( 0, -5000, 0 ), -- East
-        Vector( 0, 0, 3000 ) -- Up
-    }
-
     local ray = {}
 
     local traceData = {
         output = ray,
-        mask = MASK_NPCWORLDSTATIC,
         collisiongroup = COLLISION_GROUP_WORLD
     }
 
-    local Camera = Glide.Camera
     local TraceLine = util.TraceLine
-    local dirIndex, hSize, vSize = 0, 0, 0
 
-    --- Update the room size properties.
-    ---
-    --- To check the room size, perform just one
-    --- trace every time this function is called.
-    --- Only after we've done traces in all directions,
-    --- we update the target room properties.
-    function WebAudio:UpdateRoom( dt, eyePos )
-        local room = self.room
-
-        dirIndex = dirIndex + 1
-
-        if dirIndex > 5 then
-            room.targetHSize = hSize / 4
-            room.targetVSize = vSize
-
-            dirIndex = 1
-            hSize = 0
-            vSize = 0
-
-            -- Update room delay parameters now
-            local delayTime = 0.4
-            local delayFeedback = Clamp( ( 1 - room.hSize ) * ( 1 - room.vSize ) * 0.9, 0.05, 0.6 )
-
-            if Camera.muffleSound then
-                delayTime = 0.03
-                delayFeedback = 0.5
-            else
-                for _, v in ipairs( ROOM_ECHO_DELAYS ) do
-                    if room.hSize < v[1] then
-                        delayTime = v[2]
-                        break
-                    end
-                end
-            end
-
-            self:SetBusParameter( "delayTime", delayTime )
-            self:SetBusParameter( "delayFeedback", delayFeedback )
-            self:SetBusParameter( "postFilterBandGain", Camera.muffleSound and -12.0 or 0.0 )
-
-            local impulseResponseAudio = ROOM_INPULSE_RESPONSES[1][2]
-
-            for _, v in ipairs( ROOM_INPULSE_RESPONSES ) do
-                if room.hSize < v[1] then
-                    impulseResponseAudio = v[room.vSize < 0.6 and 2 or 3]
-                    break
-                end
-            end
-
-            if self.lastImpulseResponseAudio ~= impulseResponseAudio then
-                self.lastImpulseResponseAudio = impulseResponseAudio
-                self:SetConvolverInpulseResponseAudio( impulseResponseAudio )
-            end
-        end
-
-        -- Update room values
-        room.hSize = ExpDecay( room.hSize, room.targetHSize, 20, dt )
-        room.vSize = ExpDecay( room.vSize, room.targetVSize, 10, dt )
-
-        -- Do one trace at a time
-        traceData.start = eyePos
-        traceData.endpos = eyePos + TRACE_DIRECTIONS[dirIndex]
+    function WebAudio.TraceLine( s, e, worldOnly )
+        traceData.start = s
+        traceData.endpos = e
+        traceData.mask = worldOnly and MASK_NPCWORLDSTATIC or nil
 
         TraceLine( traceData )
 
-        local isAir = ray.HitSky or not ray.Hit
+        return ray
+    end
+end
 
-        if dirIndex > 4 then
-            vSize = isAir and 1 or ray.Fraction
+local ROOM_INPULSE_RESPONSES = {
+    -- Room size, Audio (closed ceiling), Audio (open ceiling)
+    { 0.3, "1.8s_99w_900hz_30m.wav", "1.8s_99w_100hz_30m.wav" },
+    { 0.6, "2.8s_99w_900hz_30m.wav", "2.8s_99w_100hz_30m.wav" },
+    { 0.8, "3.8s_99w_900hz_30m.wav", "3.8s_99w_100hz_30m.wav" },
+    { 1.0, "4.8s_99w_900hz_30m.wav", "4.8s_99w_100hz_30m.wav" }
+}
+
+local ROOM_ECHO_DELAYS = {
+    -- Room size, Echo delay
+    { 0.05, 0.02 },
+    { 0.2, 0.04 },
+    { 0.3, 0.1 },
+    { 0.6, 0.2 },
+    { 1.0, 0.3 }
+}
+
+local TRACE_DIRECTIONS = {
+    Vector( 5000, 0, 0 ), -- North
+    Vector( -5000, 0, 0 ), -- South
+    Vector( 0, 5000, 0 ), -- West
+    Vector( 0, -5000, 0 ), -- East
+    Vector( 0, 0, 3000 ) -- Up
+}
+
+local Camera = Glide.Camera
+local TraceLine = WebAudio.TraceLine
+local dirIndex, hSize, vSize = 0, 0, 0
+
+--- Update the room size properties.
+---
+--- To check the room size, perform just one
+--- trace every time this function is called.
+--- Only after we've done traces in all directions,
+--- we update the target room properties.
+function WebAudio:UpdateRoom( dt, eyePos )
+    local room = self.room
+
+    dirIndex = dirIndex + 1
+
+    if dirIndex > 5 then
+        room.targetHSize = hSize / 4
+        room.targetVSize = vSize
+
+        dirIndex = 1
+        hSize = 0
+        vSize = 0
+
+        -- Update room delay parameters now
+        local delayTime = 0.4
+        local delayFeedback = Clamp( ( 0.6 - room.hSize * 0.6 ) + ( 0.4 - room.vSize * 0.4 ), 0.05, 0.8 )
+
+        if Camera.muffleSound then
+            delayTime = 0.03
+            delayFeedback = 0.5
         else
-            hSize = hSize + ( isAir and 1 or ray.Fraction )
+            for _, v in ipairs( ROOM_ECHO_DELAYS ) do
+                if room.hSize < v[1] then
+                    delayTime = v[2]
+                    break
+                end
+            end
         end
+
+        self:SetBusParameter( "delayTime", delayTime )
+        self:SetBusParameter( "delayFeedback", delayFeedback )
+        self:SetBusParameter( "postFilterBandGain", Camera.muffleSound and -9.0 or 1.0 )
+        self:SetBusParameter( "postFilterQ", Camera.muffleSound and 0.4 or 0.0 )
+
+        local impulseResponseAudio = ROOM_INPULSE_RESPONSES[1][2]
+
+        for _, v in ipairs( ROOM_INPULSE_RESPONSES ) do
+            if room.hSize < v[1] then
+                impulseResponseAudio = v[room.vSize < 0.6 and 2 or 3]
+                break
+            end
+        end
+
+        if self.lastImpulseResponseAudio ~= impulseResponseAudio then
+            self.lastImpulseResponseAudio = impulseResponseAudio
+            self:SetConvolverInpulseResponseAudio( impulseResponseAudio )
+        end
+    end
+
+    -- Update room values
+    room.hSize = ExpDecay( room.hSize, room.targetHSize, 20, dt )
+    room.vSize = ExpDecay( room.vSize, room.targetVSize, 10, dt )
+
+    -- Do one trace at a time
+    local ray = TraceLine( eyePos, eyePos + TRACE_DIRECTIONS[dirIndex] )
+    local isAir = ray.HitSky or not ray.Hit
+
+    if dirIndex > 4 then
+        vSize = isAir and 1 or ray.Fraction
+    else
+        hSize = hSize + ( isAir and 1 or ray.Fraction )
     end
 end
 
@@ -358,6 +367,8 @@ local AddLine = WebAudio.AddLine
 local GetVolume = Glide.Config.GetVolume
 local GetLocalViewLocation = Glide.GetLocalViewLocation
 
+local checkedWall = {}
+
 function WebAudio:Think( dt )
     local eyePos, eyeAng = GetLocalViewLocation()
     self:UpdateRoom( dt, eyePos )
@@ -373,8 +384,8 @@ function WebAudio:Think( dt )
     local wetMultiplier = ( 1 - room.hSize ) * ( 0.5 + ( 0.4 - room.vSize * 0.6 ) )
 
     self:SetBusParameter( "preGainVolume", GetVolume( "carVolume" ) )
-    self:SetBusParameter( "dryVolume", Round( Clamp( 1 - wetMultiplier * 0.1, 0.5, 1.0 ) * 1.15, 2 ) )
-    self:SetBusParameter( "wetVolume", Round( Clamp( wetMultiplier * 2.5, 0.1, 1.5 ), 2 ) )
+    self:SetBusParameter( "dryVolume", Round( Clamp( 1 - wetMultiplier * 0.1, 0.5, 1.0 ), 2 ) )
+    self:SetBusParameter( "wetVolume", Round( Clamp( wetMultiplier * 2.5, 0.1, 1.3 ), 2 ) )
 
     --[[
         Create one big Javascript snippet, which will:
@@ -403,6 +414,8 @@ function WebAudio:Think( dt )
     end
 
     -- Update all streams
+    local checkedForWalls = false
+
     for id, stream in pairs( self.streams ) do
         if stream.isReady then
             -- If the stream preset has changed,
@@ -429,7 +442,25 @@ function WebAudio:Think( dt )
                 AddLine( "manager.setStreamWobbleTime('%s', %.2f);", id, stream.wobbleTime )
                 stream.wobbleTime = 0
             end
+
+            -- Check if this stream is behind a wall
+            if not checkedForWalls and not checkedWall[id] then
+                local freq = TraceLine( stream.position, eyePos, true ).Hit and 2000 or 20000
+                AddLine( "manager.setStreamLowpassFilterFreq('%s', %.2f);", id, freq )
+
+                -- Flag that we've checked this stream already
+                checkedWall[id] = true
+
+                -- Only do one check per "for" loop
+                checkedForWalls = true
+            end
         end
+    end
+
+    -- If we haven't done a "behind wall" trace for any of
+    -- our stream instances this tick, start the process again.
+    if not checkedForWalls then
+        table.Empty( checkedWall )
     end
 
     self.RunLines( self.panel )
