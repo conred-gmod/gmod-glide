@@ -224,38 +224,47 @@ do
     end
 end
 
+local GetParent = FindMetaTable( "Entity" ).GetParent
+
 do
+    local HookRun = hook.Run
     local TraceLine = util.TraceLine
+    local LocalToWorld = FindMetaTable( "Entity" ).LocalToWorld
+
+    local VecSet = FindMetaTable( "Vector" ).Set
+    local VecSub = FindMetaTable( "Vector" ).Sub
+    local VecDot = FindMetaTable( "Vector" ).Dot
+    local VecNormalize = FindMetaTable( "Vector" ).Normalize
+    local VecLengthSqr = FindMetaTable( "Vector" ).LengthSqr
+
     local ray = {}
     local traceData = { output = ray }
+    local diff = Vector()
 
     --- Returns true if the target entity can be locked on from a starting position and direction.
     --- Part of that includes checking if the dot product between `normal` and
     --- the direction towards the target entity is larger than `threshold`.
     --- `attacker` is the player who is trying to lock-on.
-    --- Set `includeEmpty` to true to include vehicles without a driver.
     --- `traceFilter` is a optional list of entities/classes to ignore when performing visibility checks.
-    function Glide.CanLockOnEntity( ent, origin, normal, threshold, maxDistance, attacker, includeEmpty, traceFilter )
-        if not includeEmpty and ent.GetDriver and ent:GetDriver() == NULL then
-            return false -- Don't lock on empty seats
-        end
-
+    function Glide.CanLockOnEntity( ent, origin, normal, threshold, maxDistance, attacker, traceFilter )
         maxDistance = maxDistance * maxDistance
 
-        local entPos = ent:LocalToWorld( ent:OBBCenter() )
-        local diff = entPos - origin
+        local entPos = LocalToWorld( ent, ent:OBBCenter() )
+
+        VecSet( diff, entPos )
+        VecSub( diff, origin )
 
         -- Is the entity too far away?
-        if diff:LengthSqr() > maxDistance then return false end
-        if not ent:TestPVS( origin ) then return false end
+        if VecLengthSqr( diff ) > maxDistance then return false end
 
         -- Is the entity within the field of view threshold?
-        diff:Normalize()
-        local dot = diff:Dot( normal )
+        VecNormalize( diff )
+
+        local dot = VecDot( diff, normal )
         if dot < threshold then return false end
 
         -- Check if other addons don't want the `attacker` to lock on this entity
-        if hook.Run( "Glide_CanLockOn", ent, attacker ) == false then
+        if HookRun( "Glide_CanLockOn", ent, attacker ) == false then
             return false
         end
 
@@ -266,46 +275,35 @@ do
         -- The trace result is stored on `ray`
         TraceLine( traceData )
 
+        -- If the trace didn't hit anything, allow locking on this ent
         if not ray.Hit then return true, dot end
 
-        -- Check if the trace hit the target directly
+        -- If the trace hit the ent directly, allow locking on this ent
         if ray.Entity == ent then return true, dot end
 
-        -- Check if the trace hit the target's parent
-        return IsValid( ray.Entity ) and ent:GetParent() == ray.Entity, dot
+        -- If the trace hit the ent's parent, allow locking on this ent
+        return GetParent( ent ) == ray.Entity, dot
     end
 end
 
-local EntityMeta = FindMetaTable( "Entity" )
-local getClass = EntityMeta.GetClass
-local getParent = EntityMeta.GetParent
-
-local AllEnts = ents.Iterator
 local WHITELIST = Glide.LOCKON_WHITELIST
+local BLACKLIST = Glide.LOCKON_BLACKLIST
 
-local function IsLockableEntity( ent, skipParentCheck )
-    if ent == NULL then return false end
+local GetClass = FindMetaTable( "Entity" ).GetClass
+local IsVehicle = FindMetaTable( "Entity" ).IsVehicle
 
-    local class = getClass( ent )
+local function CanAddToLockableEnts( ent )
+    local class = GetClass( ent )
 
-    -- Checks for parent vehicles, like for example glide
-    if class == "prop_vehicle_prisoner_pod" and not skipParentCheck then
-        local parent = getParent( ent )
-
-        -- Check directly against NULL as getParent returns a clean NULL object and it's faster than IsValid
-        if parent ~= NULL then
-            if IsLockableEntity( parent, true ) then
-                return false
-            end
-            return true
-        end
+    if BLACKLIST[class] then
+        return false
     end
 
-    if WHITELIST[class] then
+    if WHITELIST[class] or ( ent.BaseClass and WHITELIST[ent.BaseClass.ClassName] ) then
         return true
     end
 
-    if ent:IsVehicle() then
+    if IsVehicle( ent ) then
         return true
     end
 
@@ -313,12 +311,53 @@ local function IsLockableEntity( ent, skipParentCheck )
         return true
     end
 
-    if ent.BaseClass and WHITELIST[ent.BaseClass.ClassName] then
-        return true
-    end
-
     return false
 end
+
+local lockableEnts = {}
+
+local function TrackLockableEnt( ent )
+    ent.GlideIsLockable = true
+    lockableEnts[#lockableEnts + 1] = ent
+end
+
+hook.Add( "OnEntityCreated", "Glide.UpdateLockOnWhitelist", function( ent )
+    if not CanAddToLockableEnts( ent ) then return end
+
+    local class = GetClass( ent )
+
+    -- For seat pods, we need an extra check
+    if class == "prop_vehicle_prisoner_pod" then
+        -- To reliably get the parent, we have to defer to the next tick
+        timer.Simple( 0, function()
+            if IsValid( ent ) then
+                local parent = GetParent( ent )
+
+                -- Only include pod seats if they aren't parented to a vehicle,
+                -- as we want to lock on the whole vehicle instead.
+                if IsValid( parent ) and CanAddToLockableEnts( parent ) then
+                    return
+                end
+
+                TrackLockableEnt( ent )
+            end
+        end )
+    else
+        -- Everything else gets added to the list right away
+        TrackLockableEnt( ent )
+    end
+end )
+
+hook.Add( "EntityRemoved", "Glide.UpdateLockOnWhitelist", function( ent )
+    if ent.GlideIsLockable then
+        for i = 1, #lockableEnts do
+            if ent == lockableEnts[i] then
+                table.remove( lockableEnts, i )
+                break
+            end
+        end
+    end
+end )
 
 local CanLockOnEntity = Glide.CanLockOnEntity
 
@@ -327,21 +366,17 @@ local CanLockOnEntity = Glide.CanLockOnEntity
 function Glide.FindLockOnTarget( origin, normal, threshold, maxDistance, attacker, traceFilter, entFilter )
     local largestDot = 0
     local canLock, dot, target
-
-    local includeEmpty = attacker:GetInfoNum( "glide_homing_launcher_lock_on_empty", 0 )
-    includeEmpty = includeEmpty and includeEmpty > 0 -- Could be nil
-
     local ignore = {}
 
     if entFilter then
-        for _, ent in ipairs( entFilter ) do
-            ignore[ent] = true
+        for i = 1, #entFilter do
+            ignore[entFilter[i]] = true
         end
     end
 
-    for _, e in AllEnts() do
-        if e ~= attacker and not ignore[e] and IsLockableEntity( e ) then
-            canLock, dot = CanLockOnEntity( e, origin, normal, threshold, maxDistance, attacker, includeEmpty, traceFilter )
+    for _, e in ipairs( lockableEnts ) do
+        if e ~= attacker and not ignore[e] then
+            canLock, dot = CanLockOnEntity( e, origin, normal, threshold, maxDistance, attacker, traceFilter )
 
             if canLock and dot > largestDot then
                 largestDot = dot
